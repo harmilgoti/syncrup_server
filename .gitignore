@@ -5,3 +5,5 @@ repos/
 data/
 *.log
 .DS_Store
+
+/prisma/migrations
