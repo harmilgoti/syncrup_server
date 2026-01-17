@@ -4,11 +4,11 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { ProjectController } from './controllers/ProjectController';
-import { AIController } from './controllers/AIController';
 import { WebhookController } from './controllers/WebhookController';
 import { setIO } from './services/SocketService';
 
 import { ImpactController } from './controllers/ImpactController';
+import { RulesController } from './controllers/RulesController';
 
 const app = express();
 const httpServer = createServer(app);
@@ -17,7 +17,11 @@ const httpServer = createServer(app);
 
 // IMPORTANT: Body parser MUST come before routes
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://localhost:5174'],
+    origin: [
+        'http://localhost:5173',
+        'http://localhost:5174',
+        'vscode-webview://*'
+    ],
     credentials: true
 }));
 app.use(express.json({ limit: '10mb' })); // Increased limit for large payloads
@@ -49,7 +53,6 @@ io.on('connection', (socket) => {
 app.post('/projects', ProjectController.createProject);
 app.get('/projects', ProjectController.getProjects);
 app.post('/repos', ProjectController.addRepo);
-app.get('/graph', ProjectController.getGraph);
 app.post('/dependencies', ProjectController.createDependency);
 app.delete('/dependencies', ProjectController.deleteDependency);
 
@@ -57,13 +60,9 @@ app.delete('/dependencies', ProjectController.deleteDependency);
 app.post('/webhook/github', WebhookController.handleGitHub);
 app.post('/webhook/gitlab', WebhookController.handleGitLab);
 
-// AI Routes
-app.post('/ai/enrich', AIController.enrichNode);
-app.post('/ai/analyze-impact', AIController.analyzeImpact);
-app.post('/ai/classify-change', AIController.classifyChange);
-
 // Impact Routes
 app.patch('/impacts/file/:id/status', ImpactController.updateFileStatus);
+app.post('/rules/analyze', RulesController.analyze);
 
 const PORT = process.env.PORT || 3001;
 
