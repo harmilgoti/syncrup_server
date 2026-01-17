@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { ProjectService } from '../services/ProjectService';
-import { ExternalAIService } from '../services/ExternalAIService';
+import { IndexerService } from '../services/IndexerService';
+import { GraphService } from '../services/GraphService';
 import { getIO } from '../services/SocketService';
 
 const projectService = new ProjectService();
@@ -30,7 +31,7 @@ export class ProjectController {
         try {
             const { projectId, name, url, type } = req.body;
 
-            // Determine initial status: SERVER -> PENDING (Send to AI now), OTHERS -> UNTRACKED (Send to AI later)
+            // Determine initial status: SERVER -> PENDING (Index now), OTHERS -> UNTRACKED (Index later)
             const initialStatus = type === 'SERVER' ? 'PENDING' : 'UNTRACKED';
 
             const repo = await projectService.addRepo(projectId, name, url, type, initialStatus);
@@ -39,32 +40,36 @@ export class ProjectController {
             const io = getIO();
             io.emit('repository:added', { projectId, repository: repo });
 
-            // Only trigger external AI call if it's a SERVER repo
+            // Only trigger indexing if it's a SERVER repo
             if (type === 'SERVER') {
-                console.log(`[CONTROLLER] Sending SERVER repo to external AI server...`);
+                console.log(`[CONTROLLER] Starting background indexing for project ${projectId}...`);
 
-                const aiService = new ExternalAIService();
+                // Create project-specific graph service and indexer
+                const graphService = new GraphService(projectId);
+                const indexerService = new IndexerService(graphService);
 
-                // Send to external AI in background (non-blocking)
-                aiService.sendRepositoryToAI(projectId, url, repo.id)
-                    .then(async (result: { success: boolean; error?: string }) => {
-                        if (result.success) {
-                            console.log(`[CONTROLLER] ✅ Successfully sent repo ${repo.id} to AI server`);
-                            const updatedRepo = await projectService.updateRepoStatus(repo.id, 'INDEXED');
-                            io.emit('repository:updated', { projectId, repository: updatedRepo });
-                        } else {
-                            console.error(`[CONTROLLER] ❌ Failed to send repo ${repo.id} to AI server: ${result.error}`);
-                            const failedRepo = await projectService.updateRepoStatus(repo.id, 'FAILED');
-                            io.emit('repository:updated', { projectId, repository: failedRepo });
-                        }
+                // Trigger indexing in background
+                indexerService.cloneAndIndex(url, repo.id, repo.branch)
+                    .then(async () => {
+                        console.log(`[CONTROLLER] ✅ Indexing successful for ${repo.id}, updating status to INDEXED`);
+                        const updatedRepo = await projectService.updateRepoStatus(repo.id, 'INDEXED');
+
+                        // Emit status update event
+                        io.emit('repository:updated', { projectId, repository: updatedRepo });
+                        io.emit('graph:updated', { projectId });
                     })
-                    .catch(async (err: any) => {
-                        console.error(`[CONTROLLER] ❌ Unexpected error sending repo ${repo.id}:`, err);
+                    .then(() => {
+                        console.log(`[CONTROLLER] ✓ Status updated to INDEXED for ${repo.id}`);
+                    })
+                    .catch(async (err) => {
+                        console.error(`[CONTROLLER] ❌ Indexing failed for ${repo.id}:`, err);
                         const failedRepo = await projectService.updateRepoStatus(repo.id, 'FAILED');
+
+                        // Emit failure event
                         io.emit('repository:updated', { projectId, repository: failedRepo });
                     });
             } else {
-                console.log(`[CONTROLLER] Skipping AI processing for ${type} repo ${repo.id} (Status: UNTRACKED). Waiting for connection.`);
+                console.log(`[CONTROLLER] Skipping indexing for ${type} repo ${repo.id} (Status: UNTRACKED). waiting for connection.`);
             }
 
             res.json(repo);
@@ -83,35 +88,31 @@ export class ProjectController {
             const { sourceRepoId, targetRepoId } = req.body;
             const dep = await projectService.addDependency(sourceRepoId, targetRepoId);
 
-            // Workflow: When connecting Server -> Web/Mobile, trigger external AI processing for the Target (Web/Mobile)
+            // Workflow: When connecting Server -> Web/Mobile, trigger indexing for the Target (Web/Mobile)
             // 1. Get Target Repo
             const targetRepo = await projectService.getRepo(targetRepoId);
 
             if (targetRepo && targetRepo.status === 'UNTRACKED') {
-                console.log(`[CONTROLLER] Connection established. Sending tied repo ${targetRepo.name} to AI server...`);
+                console.log(`[CONTROLLER] Connection established. Triggering indexing for tied repo ${targetRepo.name}...`);
                 const io = getIO();
 
                 // Update to PENDING
                 const pendingRepo = await projectService.updateRepoStatus(targetRepo.id, 'PENDING');
                 io.emit('repository:updated', { projectId: pendingRepo.projectId, repository: pendingRepo });
 
-                const aiService = new ExternalAIService();
+                // Start Indexing
+                const graphService = new GraphService(pendingRepo.projectId);
+                const indexerService = new IndexerService(graphService);
 
-                // Send to external AI in background
-                aiService.sendRepositoryToAI(pendingRepo.projectId, pendingRepo.url, pendingRepo.id)
-                    .then(async (result: { success: boolean; error?: string }) => {
-                        if (result.success) {
-                            console.log(`[CONTROLLER] ✅ Successfully sent repo ${pendingRepo.id} to AI server`);
-                            const indexedRepo = await projectService.updateRepoStatus(pendingRepo.id, 'INDEXED');
-                            io.emit('repository:updated', { projectId: pendingRepo.projectId, repository: indexedRepo });
-                        } else {
-                            console.error(`[CONTROLLER] ❌ Failed to send repo ${pendingRepo.id} to AI server: ${result.error}`);
-                            const failedRepo = await projectService.updateRepoStatus(pendingRepo.id, 'FAILED');
-                            io.emit('repository:updated', { projectId: pendingRepo.projectId, repository: failedRepo });
-                        }
+                indexerService.cloneAndIndex(pendingRepo.url, pendingRepo.id, pendingRepo.branch)
+                    .then(async () => {
+                        console.log(`[CONTROLLER] ✅ Indexing successful for ${pendingRepo.id}`);
+                        const indexedRepo = await projectService.updateRepoStatus(pendingRepo.id, 'INDEXED');
+                        io.emit('repository:updated', { projectId: pendingRepo.projectId, repository: indexedRepo });
+                        io.emit('graph:updated', { projectId: pendingRepo.projectId });
                     })
-                    .catch(async (err: any) => {
-                        console.error(`[CONTROLLER] ❌ Unexpected error sending repo ${pendingRepo.id}:`, err);
+                    .catch(async (err) => {
+                        console.error(`[CONTROLLER] ❌ Indexing failed for ${pendingRepo.id}:`, err);
                         const failedRepo = await projectService.updateRepoStatus(pendingRepo.id, 'FAILED');
                         io.emit('repository:updated', { projectId: pendingRepo.projectId, repository: failedRepo });
                     });
@@ -137,12 +138,17 @@ export class ProjectController {
                 const targetRepo = await projectService.getRepo(targetRepoId);
                 // Only revert if it's NOT a server repo (Servers stand alone)
                 if (targetRepo && targetRepo.type !== 'SERVER') {
-                    console.log(`[CONTROLLER] Repo ${targetRepo.name} is now orphaned. Reverting to UNTRACKED.`);
+                    console.log(`[CONTROLLER] Repo ${targetRepo.name} is now orphaned. Reverting to UNTRACKED and clearing data.`);
 
-                    // Revert Status (no graph data to clear - handled by external AI)
+                    // 1. Revert Status
                     const untrackedRepo = await projectService.updateRepoStatus(targetRepo.id, 'UNTRACKED');
                     const io = getIO();
                     io.emit('repository:updated', { projectId: untrackedRepo.projectId, repository: untrackedRepo });
+
+                    // 2. Clear Graph Data
+                    const graphService = new GraphService(untrackedRepo.projectId);
+                    graphService.removeNodesByRepoId(targetRepo.id);
+                    io.emit('graph:updated', { projectId: untrackedRepo.projectId });
                 }
             }
 
@@ -155,34 +161,30 @@ export class ProjectController {
     static async getGraph(req: Request, res: Response) {
         try {
             const { projectId } = req.query;
+            const graphService = new GraphService(projectId as string);
+            const graph = graphService.getGraph();
 
-            if (!projectId) {
-                return res.status(400).json({ error: 'projectId is required' });
-            }
+            // Merge manual dependencies from DB
+            const dbDeps = await projectService.getDependencies(projectId as string);
+            const entryEdges = dbDeps.map(d => ({
+                source: d.sourceRepoId, // Node ID is simply Repo ID for high level
+                target: d.targetRepoId,
+                type: 'MANUAL'
+            }));
 
-            // Fetch graph data from external AI server
-            const aiUrl = process.env.EXTERNAL_AI_API_URL || 'http://localhost:8000';
-            const endpoint = `${aiUrl}/graph-data?project_id=${projectId}`;
+            // We might need to adjust how the frontend expects edges. 
+            // The frontend expects "repoId:filePath".
+            // But for high-level visualization, we want Repo-to-Repo edges.
+            // The current GraphService returns File-to-File edges.
+            // We'll append these high-level edges.
+            // Note: The frontend ProjectDetailView filters edges by splitting on ':'.
+            // So if we send "RepoID", it implies "RepoID:undefined".
+            // Let's send them purely as RepoID and handle in frontend or assume frontend handles "RepoID" source.
 
-            console.log(`[CONTROLLER] Fetching graph data from: ${endpoint}`);
-
-            try {
-                const response = await fetch(endpoint);
-
-                if (!response.ok) {
-                    throw new Error(`External AI server returned ${response.status}`);
-                }
-
-                const data = await response.json();
-                res.json(data);
-            } catch (aiError) {
-                console.error('[CONTROLLER] Failed to fetch from AI server:', aiError);
-                // Return empty graph if AI server is unavailable
-                res.json({
-                    nodes: [],
-                    edges: []
-                });
-            }
+            res.json({
+                nodes: graph.nodes,
+                edges: [...graph.edges, ...entryEdges]
+            });
         } catch (error) {
             res.status(500).json({ error: (error as Error).message });
         }

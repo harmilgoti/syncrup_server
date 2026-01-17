@@ -4,6 +4,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { ProjectController } from './controllers/ProjectController';
+import { AIController } from './controllers/AIController';
 import { WebhookController } from './controllers/WebhookController';
 import { setIO } from './services/SocketService';
 
@@ -53,12 +54,18 @@ io.on('connection', (socket) => {
 app.post('/projects', ProjectController.createProject);
 app.get('/projects', ProjectController.getProjects);
 app.post('/repos', ProjectController.addRepo);
+app.get('/graph', ProjectController.getGraph);
 app.post('/dependencies', ProjectController.createDependency);
 app.delete('/dependencies', ProjectController.deleteDependency);
 
 // Webhook Routes
 app.post('/webhook/github', WebhookController.handleGitHub);
 app.post('/webhook/gitlab', WebhookController.handleGitLab);
+
+// AI Routes
+app.post('/ai/enrich', AIController.enrichNode);
+app.post('/ai/analyze-impact', AIController.analyzeImpact);
+app.post('/ai/classify-change', AIController.classifyChange);
 
 // Impact Routes
 app.patch('/impacts/file/:id/status', ImpactController.updateFileStatus);
