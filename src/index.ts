@@ -8,6 +8,7 @@ import { WebhookController } from './controllers/WebhookController';
 import { setIO } from './services/SocketService';
 
 import { ImpactController } from './controllers/ImpactController';
+import { RulesController } from './controllers/RulesController';
 
 const app = express();
 const httpServer = createServer(app);
@@ -16,7 +17,11 @@ const httpServer = createServer(app);
 
 // IMPORTANT: Body parser MUST come before routes
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://localhost:5174'],
+    origin: [
+        'http://localhost:5173',
+        'http://localhost:5174',
+        'vscode-webview://*'
+    ],
     credentials: true
 }));
 app.use(express.json({ limit: '10mb' })); // Increased limit for large payloads
@@ -57,6 +62,7 @@ app.post('/webhook/gitlab', WebhookController.handleGitLab);
 
 // Impact Routes
 app.patch('/impacts/file/:id/status', ImpactController.updateFileStatus);
+app.post('/rules/analyze', RulesController.analyze);
 
 const PORT = process.env.PORT || 3001;
 
